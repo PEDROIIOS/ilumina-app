@@ -18,7 +18,7 @@ def get_db_connection():
     conn = sqlite3.connect(db_path)
     return conn
 
-# Ensure the database and default admin user exist
+# Ensure the database and default admin user exist and has the correct schema
 # This function should be called every time the app starts to ensure the DB exists
 # and create it if necessary.
 def setup_database():
@@ -47,6 +47,18 @@ def setup_database():
                 responsavel TEXT
             )
         ''')
+
+        # --- Add 'observacao' column if it doesn't exist ---
+        # Check if the column exists
+        c.execute("PRAGMA table_info(ordens_servico);")
+        cols = [column[1] for column in c.fetchall()]
+        if 'observacao' not in cols:
+            c.execute('ALTER TABLE ordens_servico ADD COLUMN observacao TEXT')
+            conn.commit()
+            st.sidebar.info("Coluna 'observacao' adicionada à tabela 'ordens_servico'.") # Use sidebar for setup messages
+        # --- End Add 'observacao' column ---
+
+
         # Add default admin user if not exists
         # Check if admin exists before inserting
         c.execute('SELECT COUNT(*) FROM users WHERE username = "admin"')
@@ -111,6 +123,8 @@ def login_page():
 
     if st.button("Entrar"):
         # Check if the database file exists before attempting connection
+        # The setup_database function should create it if it doesn't exist,
+        # but a quick check before login attempt is safer.
         if not os.path.exists(db_path):
              st.error(f"Database file not found at {db_path}. Attempting setup now...")
              setup_database() # Try setting up again just in case
@@ -199,31 +213,155 @@ def main_dashboard():
 
     # --- Display Filtered Data ---
     st.subheader("Ordens de Serviço (Filtradas)")
-    st.dataframe(filtered_df)
+    # Include 'observacao' in the displayed columns
+    display_columns = ['protocolo', 'nome', 'endereco', 'zona', 'status', 'responsavel', 'observacao']
+    # Ensure columns exist in the filtered_df before selecting
+    display_columns = [col for col in display_columns if col in filtered_df.columns]
+
+    # --- Action Buttons (Implementing status change and delete) ---
+    # Since Streamlit re-runs the script on every interaction, managing state for
+    # individual row buttons requires a different pattern than Flask/Colab.
+    # We can add buttons/forms within the dataframe row using st.columns or iterate
+    # over rows and create inputs/buttons. Iterating is more flexible for actions.
+
+    st.write("---") # Separator
+    st.subheader("Detalhes e Ações por Ordem de Serviço")
+
+    # Re-fetch data to ensure we have the latest state after potential actions
+    conn = get_db_connection()
+    df_os_actions = pd.read_sql_query('SELECT * FROM ordens_servico', conn)
+    conn.close()
+
+    # Ensure 'observacao' is a string and handle potential None values for display/editing
+    if 'observacao' in df_os_actions.columns:
+         df_os_actions['observacao'] = df_os_actions['observacao'].fillna('').astype(str)
+    else:
+         # If 'observacao' column was just added and DB was empty, it might not appear in df_os_actions.columns
+         # Add it with empty strings if missing.
+         df_os_actions['observacao'] = ''
 
 
-    # --- Action Buttons (Simplified for Streamlit) ---
-    # For a full Streamlit app, actions like "Iniciar Tratamento" and "Excluir"
-    # would require more complex state management and potentially separate pages or modals.
-    # Here, we'll just demonstrate the Admin section and report generation.
+    # Iterate through filtered rows to display details and action buttons
+    if not filtered_df.empty:
+        for index, row in filtered_df.iterrows():
+            st.write(f"**Protocolo:** {row['protocolo']}")
+            st.write(f"**Nome:** {row['nome']}")
+            st.write(f"**Endereço:** {row['endereco']}")
+            st.write(f"**Zona:** {row['zona']}")
+            st.write(f"**Status:** {row['status']}")
+            st.write(f"**Responsável:** {row['responsavel']}")
+
+            # Add Observation field (editable)
+            # Use a unique key for each text_area based on the row index or protocol
+            current_observation = row.get('observacao', '') # Get observation, default to empty string if column missing
+            new_observation = st.text_area(f"Observação (Protocolo {row['protocolo']}):", value=current_observation, key=f"obs_{row['protocolo']}")
+
+            # Action Buttons: Start, Complete, Revert, Delete
+            col_actions1, col_actions2, col_actions3, col_actions4 = st.columns(4)
+            action_taken = False # Flag to trigger rerun after an action
+
+            # Update Observation Button (only if observation changed)
+            if new_observation != current_observation:
+                 if st.button("Salvar Observação", key=f"save_obs_{row['protocolo']}"):
+                     conn = get_db_connection()
+                     c = conn.cursor()
+                     c.execute('UPDATE ordens_servico SET observacao = ? WHERE protocolo = ?', (new_observation, row['protocolo']))
+                     conn.commit()
+                     conn.close()
+                     st.success(f"Observação para {row['protocolo']} salva.")
+                     action_taken = True # Trigger rerun
+            else:
+                 # If observation didn't change, show a disabled or different button/message
+                 st.write("Observação atualizada.") # Or a disabled button placeholder
+
+            # Status Change Buttons
+            if row['status'] == 'pendente':
+                if col_actions1.button("Iniciar Tratamento", key=f"start_{row['protocolo']}"):
+                    # Need a way to select responsible user in Streamlit - for now, use logged-in user
+                    responsavel = st.session_state.get('username', 'Desconhecido') # Get logged-in username
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute('UPDATE ordens_servico SET status = ?, responsavel = ? WHERE protocolo = ?', ('em-andamento', responsavel, row['protocolo']))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"OS {row['protocolo']} marcada como 'em-andamento'.")
+                    action_taken = True # Trigger rerun
+
+            elif row['status'] == 'em-andamento':
+                if col_actions1.button("Marcar como Concluída", key=f"complete_{row['protocolo']}"):
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute('UPDATE ordens_servico SET status = ? WHERE protocolo = ?', ('concluida', row['protocolo']))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"OS {row['protocolo']} marcada como 'concluída'.")
+                    action_taken = True # Trigger rerun
+                if col_actions2.button("Reverter para Pendente", key=f"revert_pending_{row['protocolo']}"):
+                     conn = get_db_connection()
+                     c = conn.cursor()
+                     c.execute('UPDATE ordens_servico SET status = ?, responsavel = ? WHERE protocolo = ?', ('pendente', None, row['protocolo'])) # Clear responsible on revert
+                     conn.commit()
+                     conn.close()
+                     st.success(f"OS {row['protocolo']} revertida para 'pendente'.")
+                     action_taken = True # Trigger rerun
+
+
+            elif row['status'] == 'concluida':
+                 if col_actions1.button("Reverter para Em Andamento", key=f"revert_inprogress_{row['protocolo']}"):
+                      # Need responsible user if reverting to 'em-andamento' - use logged-in user
+                      responsavel = st.session_state.get('username', 'Desconhecido') # Get logged-in username
+                      conn = get_db_connection()
+                      c = conn.cursor()
+                      c.execute('UPDATE ordens_servico SET status = ?, responsavel = ? WHERE protocolo = ?', ('em-andamento', responsavel, row['protocolo']))
+                      conn.commit()
+                      conn.close()
+                      st.success(f"OS {row['protocolo']} revertida para 'em-andamento'.")
+                      action_taken = True # Trigger rerun
+
+
+            # Delete Button (Admin only)
+            if st.session_state.get('role') == 'Administrador':
+                if col_actions4.button("Excluir OS", key=f"delete_{row['protocolo']}"):
+                    # Add confirmation logic
+                    confirm_delete = st.sidebar.radio(f"Confirmar exclusão da OS {row['protocolo']}?", ('Não', 'Sim'), key=f"confirm_delete_{row['protocolo']}")
+                    if confirm_delete == 'Sim':
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        c.execute('DELETE FROM ordens_servico WHERE protocolo = ?', (row['protocolo'],))
+                        conn.commit()
+                        conn.close()
+                        st.success(f"OS {row['protocolo']} excluída.")
+                        action_taken = True # Trigger rerun
+                    else:
+                        st.sidebar.info("Exclusão cancelada.")
+
+
+            st.write("---") # Separator between OS entries
+
+        if action_taken:
+            st.rerun() # Rerun the script to show updated data and buttons
+
+    else:
+        st.info("Nenhuma Ordem de Serviço encontrada com os filtros aplicados.")
+
 
     # --- Upload CSV ---
     st.subheader("Upload de Ordens de Serviço (CSV)")
-    uploaded_file = st.file_uploader("Escolha um arquivo CSV", type="csv")
+    uploaded_file = st.file_uploader("Escolha um arquivo CSV", type="csv", key="csv_uploader") # Add key
     if uploaded_file is not None:
         try:
             df_upload = pd.read_csv(uploaded_file)
             st.write("Prévia do CSV uploaded:")
             st.dataframe(df_upload.head())
 
-            if st.button("Processar e Substituir Dados Existentes"):
+            if st.button("Processar e Substituir Dados Existentes", key="process_csv_button"): # Add key
                  # Check if the database file exists before attempting connection
                  if not os.path.exists(db_path):
                      st.error(f"Database file not found at {db_path}. Attempting setup now...")
                      setup_database() # Try setting up again just in case
                      if not os.path.exists(db_path):
                          st.error("Database file still not found after setup attempt.")
-                         # st.rerun() # Might be stuck in a loop, better to stop or return
+                         # st.experimental_rerun() # Might be stuck in a loop, better to stop or return
                          return
 
 
@@ -243,16 +381,26 @@ def main_dashboard():
                      missing_essential = [col for col in ['protocolo', 'nome', 'endereco', 'status', 'responsavel'] if col not in df_upload.columns]
                      st.error(f"Erro: Colunas essenciais faltando no CSV: {missing_essential}")
                      conn.close()
-                     # st.rerun() # Might be stuck in a loop, better to stop or return
+                     st.rerun() # Use st.rerun()
                      return
 
+                 # If 'observacao' is in the uploaded CSV, include it. Otherwise, it will be None by default in the DB.
+                 optional_columns = ['observacao']
+                 for col in optional_columns:
+                      if col in df_upload.columns:
+                           required_columns.append(col)
+                           # Ensure the column exists in df_upload before selecting it
+                           if col not in df_upload.columns:
+                                df_upload[col] = None # Add column with None if it was missing initially but added to required_columns
+
                  df_to_insert = df_upload[required_columns]
+
 
                  try:
                     df_to_insert.to_sql('ordens_servico', conn, if_exists='replace', index=False)
                     conn.commit()
                     st.success(f"{len(df_to_insert)} registros importados com sucesso!")
-                    st.rerun() # Rerun to refresh data display
+                    st.rerun() # Use st.rerun() to refresh data display
                  except Exception as e:
                     st.error(f"Erro ao inserir dados no banco de dados: {e}")
                  finally:
@@ -273,22 +421,75 @@ def main_dashboard():
         st.plotly_chart(fig_status, use_container_width=True)
 
         # OS by Zone
-        if 'zona' in df_os.columns and not df_os['zona'].empty:
+        if 'zona' in df_os.columns:
             zona_counts = df_os['zona'].value_counts().reset_index()
             zona_counts.columns = ['zona', 'count']
             fig_zona = px.bar(zona_counts, x='zona', y='count', title='OS por Zona',
                               color_discrete_sequence=['#36A2EB'])
             st.plotly_chart(fig_zona, use_container_width=True)
-        elif 'zona' in df_os.columns and df_os['zona'].empty:
-             st.info("Nenhum dado de 'zona' para exibir o gráfico por zona.")
         else:
-            st.warning("Coluna 'zona' não encontrada nos dados para gerar o gráfico por zona.")
+            st.info("Coluna 'zona' não encontrada nos dados para gerar o gráfico por zona.")
+
+        # --- New Graph: OS by Date ---
+        # This requires a date column in the 'ordens_servico' table.
+        # Assuming a column named 'created_at' or similar exists and contains dates.
+        # If your actual DB uses a different column name or format, adjust the query.
+        # We will try to get data and plot it if a suitable date column is found.
+
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('PRAGMA table_info(ordens_servico);')
+        cols = [col[1] for col in c.fetchall()]
+        date_column = None
+        for potential_col in ['created_at', 'data_registro', 'data_criacao', 'data']: # Add other potential date column names
+            if potential_col in cols:
+                date_column = potential_col
+                break
+        conn.close() # Close connection after checking schema
+
+        if date_column:
+            conn = get_db_connection()
+            # Read data specifically for the date graph
+            try:
+                # Ensure the date column is treated as datetime by pandas for plotting
+                df_date_graph = pd.read_sql_query(f'SELECT {date_column} FROM ordens_servico WHERE {date_column} IS NOT NULL', conn)
+                conn.close()
+
+                if not df_date_graph.empty:
+                    # Convert the date column to datetime objects
+                    # Use errors='coerce' to turn invalid date formats into NaT (Not a Time)
+                    df_date_graph['date'] = pd.to_datetime(df_date_graph[date_column], errors='coerce')
+                    # Drop rows where date conversion failed
+                    df_date_graph.dropna(subset=['date'], inplace=True)
+
+                    if not df_date_graph.empty:
+                        # Group by date and count
+                        date_counts = df_date_graph['date'].dt.date.value_counts().reset_index()
+                        date_counts.columns = ['date', 'count']
+                        # Sort by date for proper time series plotting
+                        date_counts['date'] = pd.to_datetime(date_counts['date'])
+                        date_counts = date_counts.sort_values('date')
+
+                        fig_date = px.line(date_counts, x='date', y='count', title='OS ao Longo do Tempo',
+                                           color_discrete_sequence=['#FF6384'])
+                        st.plotly_chart(fig_date, use_container_width=True)
+                    else:
+                         st.info(f"Nenhum dado válido na coluna '{date_column}' para exibir o gráfico por data após conversão para datetime.")
+
+                else:
+                    st.info(f"Nenhum dado com '{date_column}' encontrado na tabela para o gráfico por data.")
+
+            except Exception as e:
+                 st.error(f"Erro ao gerar gráfico por data usando a coluna '{date_column}': {e}")
+                 if conn: conn.close() # Ensure connection is closed on error
+
+        else:
+            st.warning("Nenhuma coluna de data adequada ('created_at', 'data_registro', etc.) encontrada na tabela 'ordens_servico' para gerar o gráfico por data.")
 
 
-        # Placeholder for Activity and Trend graphs (requires date/time columns)
-        # You would need to add date/time columns to your ordens_servico table
-        # and parse them correctly to create these graphs.
-        st.info("Gráficos de Atividade Semanal e Tendência Mensal requerem colunas de data/hora nos dados.")
+        # Placeholder for Activity and Trend graphs (requires date/time columns and more complex logic)
+        # st.info("Gráficos de Atividade Semanal e Tendência Mensal requerem colunas de data/hora nos dados e lógica de agregação por período.")
+
 
     else:
         st.info("Sem dados de Ordens de Serviço para exibir gráficos.")
@@ -301,7 +502,6 @@ def main_dashboard():
         st.write("Funcionalidades para criar/gerenciar usuários aqui.")
 
         # Example: Display existing users (excluding password)
-        # Check if the database file exists before attempting connection
         if not os.path.exists(db_path):
             st.error(f"Database file not found at {db_path}. Cannot display users.")
         else:
@@ -319,7 +519,6 @@ def main_dashboard():
         if st.button("Criar Usuário"):
             if not new_username or not new_password:
                 st.error("Nome de usuário e senha são obrigatórios.")
-            # Check if the database file exists before attempting connection
             elif not os.path.exists(db_path):
                  st.error(f"Database file not found at {db_path}. Cannot create user.")
             else:
@@ -332,15 +531,18 @@ def main_dashboard():
                     conn.close()
                 else:
                     hashed_password = generate_password_hash(new_password)
-                    # Use time.strftime for date consistency
-                    created_at = time.strftime('%d/%m/%Y')
+                    try:
+                        created_at = time.strftime('%d/%m/%Y')
+                    except:
+                         import time
+                         created_at = time.strftime('%d/%m/%Y')
 
                     c.execute('''INSERT INTO users (username, password, role, created_at) VALUES (?, ?, ?, ?)''',
                               (new_username, hashed_password, new_role, created_at))
                     conn.commit()
                     st.success(f"Usuário '{new_username}' criado com sucesso!")
                     conn.close()
-                    st.rerun() # Refresh user list
+                    st.rerun() # Use st.rerun() # Refresh user list
 
 
         # Placeholder for Change Password form
@@ -351,7 +553,6 @@ def main_dashboard():
         if st.button("Alterar Senha"):
              if not target_username_change or not new_password_change:
                  st.error("Nome de usuário e nova senha são obrigatórios.")
-             # Check if the database file exists before attempting connection
              elif not os.path.exists(db_path):
                  st.error(f"Database file not found at {db_path}. Cannot change password.")
              else:
@@ -368,7 +569,7 @@ def main_dashboard():
                      conn.commit()
                      st.success(f"Senha do usuário '{target_username_change}' alterada com sucesso!")
                      conn.close()
-                     st.rerun() # Refresh
+                     st.rerun() # Use st.rerun() # Refresh
 
         # Placeholder for Delete OS button (Admin only) - requires more careful implementation
         # st.subheader("Excluir Ordem de Serviço")
@@ -381,7 +582,6 @@ def main_dashboard():
     # --- Report Generation ---
     st.subheader("Relatórios")
     if st.button("Gerar Relatório CSV"):
-         # Check if the database file exists before attempting connection
          if not os.path.exists(db_path):
              st.error(f"Database file not found at {db_path}. Cannot generate report.")
          else:
@@ -416,6 +616,7 @@ try:
     from werkzeug.security import check_password_hash
     import plotly.express as px
     import os # Ensure os is imported for path checks
+    import time # Ensure time is imported for date handling if needed
 except ImportError as e:
     st.error(f"Parece que as bibliotecas necessárias não estão instaladas. Erro: {e}")
     st.stop() # Stop the app if imports fail
