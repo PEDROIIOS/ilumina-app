@@ -1,0 +1,5 @@
+streamlit
+pandas
+plotly
+sqlite3 # Usually built-in, but good to list if needed
+werkzeug # Needed for check_password_hash
