@@ -130,7 +130,7 @@ def login_page():
             st.session_state['username'] = user_row[1]
             st.session_state['role'] = user_row[3]
             st.success(f"Bem-vindo, {st.session_state['username']} ({st.session_state['role']})!")
-            st.experimental_rerun() # Rerun the app to go to the main page
+            st.rerun() # Rerun the app to go to the main page
         else:
             st.error("Credenciais inválidas")
 
@@ -142,7 +142,7 @@ def main_dashboard():
         st.session_state['logged_in'] = False
         del st.session_state['username']
         del st.session_state['role']
-        st.experimental_rerun()
+        st.rerun()
 
     st.title("Dashboard")
 
@@ -223,7 +223,7 @@ def main_dashboard():
                      setup_database() # Try setting up again just in case
                      if not os.path.exists(db_path):
                          st.error("Database file still not found after setup attempt.")
-                         # st.experimental_rerun() # Might be stuck in a loop, better to stop or return
+                         # st.rerun() # Might be stuck in a loop, better to stop or return
                          return
 
 
@@ -243,7 +243,7 @@ def main_dashboard():
                      missing_essential = [col for col in ['protocolo', 'nome', 'endereco', 'status', 'responsavel'] if col not in df_upload.columns]
                      st.error(f"Erro: Colunas essenciais faltando no CSV: {missing_essential}")
                      conn.close()
-                     # st.experimental_rerun() # Might be stuck in a loop, better to stop or return
+                     # st.rerun() # Might be stuck in a loop, better to stop or return
                      return
 
                  df_to_insert = df_upload[required_columns]
@@ -252,7 +252,7 @@ def main_dashboard():
                     df_to_insert.to_sql('ordens_servico', conn, if_exists='replace', index=False)
                     conn.commit()
                     st.success(f"{len(df_to_insert)} registros importados com sucesso!")
-                    st.experimental_rerun() # Rerun to refresh data display
+                    st.rerun() # Rerun to refresh data display
                  except Exception as e:
                     st.error(f"Erro ao inserir dados no banco de dados: {e}")
                  finally:
@@ -340,7 +340,7 @@ def main_dashboard():
                     conn.commit()
                     st.success(f"Usuário '{new_username}' criado com sucesso!")
                     conn.close()
-                    st.experimental_rerun() # Refresh user list
+                    st.rerun() # Refresh user list
 
 
         # Placeholder for Change Password form
@@ -368,7 +368,7 @@ def main_dashboard():
                      conn.commit()
                      st.success(f"Senha do usuário '{target_username_change}' alterada com sucesso!")
                      conn.close()
-                     st.experimental_rerun() # Refresh
+                     st.rerun() # Refresh
 
         # Placeholder for Delete OS button (Admin only) - requires more careful implementation
         # st.subheader("Excluir Ordem de Serviço")
