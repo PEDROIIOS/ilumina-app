@@ -6,11 +6,12 @@ from werkzeug.security import check_password_hash
 import pandas as pd # Will be needed for data display
 import plotly.express as px # Will be needed for graphs
 import os # Needed for file path checks
+import time # Needed for time.strftime if pandas is not available
 
-# Define the database path (adjust if necessary for deployment environment)
-# For Colab, it's /content/database.db
-# For Streamlit Cloud, you might need to handle this differently (e.g., using secrets, or a persistent storage method)
-db_path = '/content/database.db' # Keep this for Colab testing
+# Define the database path relative to the app's directory in the deployment environment
+# This will create/look for database.db in the root of the deployed app's filesystem.
+# WARNING: Data will NOT be persistent across deployments/restarts on ephemeral filesystems like Streamlit Cloud.
+db_path = 'database.db' # Changed from '/content/database.db'
 
 # Function to get database connection
 def get_db_connection():
@@ -18,60 +19,56 @@ def get_db_connection():
     return conn
 
 # Ensure the database and default admin user exist
-# This part should ideally be run once during setup, not every time the app loads
-# In Streamlit, this might go into a setup script or be handled on first run logic
+# This function should be called every time the app starts to ensure the DB exists
+# and create it if necessary.
 def setup_database():
-    conn = get_db_connection()
-    c = conn.cursor()
-    # Create users table if it doesn't exist
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            created_at TEXT
-        )
-    ''')
-    # Create ordens_servico table if it doesn't exist
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS ordens_servico (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            protocolo TEXT UNIQUE NOT NULL,
-            nome TEXT,
-            endereco TEXT,
-            zona TEXT,
-            status TEXT,
-            responsavel TEXT
-        )
-    ''')
-    # Add default admin user if not exists
-    # Check if admin exists before inserting
-    c.execute('SELECT COUNT(*) FROM users WHERE username = "admin"')
-    if c.fetchone()[0] == 0:
-        # Generate password hash for 'ilumina2025'
-        # Requires werkzeug.security.generate_password_hash
-        from werkzeug.security import generate_password_hash
-        admin_password_hash = generate_password_hash('ilumina2025')
-        # Check if pandas is available for Timestamp, otherwise use simple time
-        try:
-            created_at = pd.Timestamp.now().strftime('%d/%m/%Y')
-        except:
-            import time
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Create users table if it doesn't exist
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT
+            )
+        ''')
+        # Create ordens_servico table if it doesn't exist
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ordens_servico (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                protocolo TEXT UNIQUE NOT NULL,
+                nome TEXT,
+                endereco TEXT,
+                zona TEXT,
+                status TEXT,
+                responsavel TEXT
+            )
+        ''')
+        # Add default admin user if not exists
+        # Check if admin exists before inserting
+        c.execute('SELECT COUNT(*) FROM users WHERE username = "admin"')
+        if c.fetchone()[0] == 0:
+            # Generate password hash for 'ilumina2025'
+            from werkzeug.security import generate_password_hash
+            admin_password_hash = generate_password_hash('ilumina2025')
+            # Use time.strftime for date format consistency, less dependency on pandas
             created_at = time.strftime('%d/%m/%Y')
 
-        c.execute('''INSERT INTO users (username, password, role, created_at) VALUES (?, ?, ?, ?)''',
-                  ('admin', admin_password_hash, 'Administrador', created_at))
-        conn.commit()
-        print("Default admin user created.")
-    conn.close()
+            c.execute('''INSERT INTO users (username, password, role, created_at) VALUES (?, ?, ?, ?)''',
+                      ('admin', admin_password_hash, 'Administrador', created_at))
+            conn.commit()
+            st.sidebar.success("Default admin user created (user: admin, pass: ilumina2025)") # Use Streamlit sidebar for messages
+        conn.close()
+        # st.sidebar.info("Database setup complete.") # Optional info message
+    except Exception as e:
+        st.sidebar.error(f"Error during database setup: {e}")
 
-# Run database setup on first load (or in a separate setup step)
-# Check if db_path exists before trying to set up the database
-if os.path.exists(db_path):
-    setup_database()
-else:
-    st.error(f"Database file not found at {db_path}. Please run the initial setup cells.")
+
+# Run database setup on every app startup
+setup_database()
 
 
 # --- Streamlit App ---
@@ -113,9 +110,14 @@ def login_page():
     password = st.text_input("Senha:", type="password")
 
     if st.button("Entrar"):
+        # Check if the database file exists before attempting connection
         if not os.path.exists(db_path):
-            st.error(f"Database file not found at {db_path}. Please run the initial setup cells.")
-            return
+             st.error(f"Database file not found at {db_path}. Attempting setup now...")
+             setup_database() # Try setting up again just in case
+             if not os.path.exists(db_path):
+                 st.error("Database file still not found after setup attempt.")
+                 return # Stop if DB still not created
+
 
         conn = get_db_connection()
         c = conn.cursor()
@@ -144,9 +146,10 @@ def main_dashboard():
 
     st.title("Dashboard")
 
+    # Check if the database file exists before attempting connection
     if not os.path.exists(db_path):
-        st.error(f"Database file not found at {db_path}. Please run the initial setup cells.")
-        return
+        st.error(f"Database file not found at {db_path}. Please ensure database setup runs correctly on startup.")
+        st.stop() # Stop execution if DB is missing
 
     conn = get_db_connection()
     df_os = pd.read_sql_query('SELECT * FROM ordens_servico', conn)
@@ -174,10 +177,10 @@ def main_dashboard():
     st.subheader("Filtros")
     col_filter1, col_filter2, col_filter3 = st.columns(3)
     with col_filter1:
-        all_zones = ['Todas as Zonas'] + list(df_os['zona'].unique()) if 'zona' in df_os.columns else ['Todas as Zonas']
+        all_zones = ['Todas as Zonas'] + list(df_os['zona'].unique()) if 'zona' in df_os.columns and not df_os['zona'].empty else ['Todas as Zonas']
         zona_filter = st.selectbox('Zona:', all_zones)
     with col_filter2:
-        all_statuses = ['Todos'] + list(df_os['status'].unique()) if 'status' in df_os.columns else ['Todos']
+        all_statuses = ['Todos'] + list(df_os['status'].unique()) if 'status' in df_os.columns and not df_os['status'].empty else ['Todos']
         status_filter = st.selectbox('Status:', all_statuses)
     with col_filter3:
         search_term = st.text_input('Buscar por Protocolo ou Nome:')
@@ -214,9 +217,15 @@ def main_dashboard():
             st.dataframe(df_upload.head())
 
             if st.button("Processar e Substituir Dados Existentes"):
+                 # Check if the database file exists before attempting connection
                  if not os.path.exists(db_path):
-                    st.error(f"Database file not found at {db_path}. Cannot upload.")
-                    return
+                     st.error(f"Database file not found at {db_path}. Attempting setup now...")
+                     setup_database() # Try setting up again just in case
+                     if not os.path.exists(db_path):
+                         st.error("Database file still not found after setup attempt.")
+                         # st.experimental_rerun() # Might be stuck in a loop, better to stop or return
+                         return
+
 
                  conn = get_db_connection()
                  # Convert column names to lowercase for case-insensitive matching
@@ -234,7 +243,7 @@ def main_dashboard():
                      missing_essential = [col for col in ['protocolo', 'nome', 'endereco', 'status', 'responsavel'] if col not in df_upload.columns]
                      st.error(f"Erro: Colunas essenciais faltando no CSV: {missing_essential}")
                      conn.close()
-                     st.experimental_rerun()
+                     # st.experimental_rerun() # Might be stuck in a loop, better to stop or return
                      return
 
                  df_to_insert = df_upload[required_columns]
@@ -264,14 +273,17 @@ def main_dashboard():
         st.plotly_chart(fig_status, use_container_width=True)
 
         # OS by Zone
-        if 'zona' in df_os.columns:
+        if 'zona' in df_os.columns and not df_os['zona'].empty:
             zona_counts = df_os['zona'].value_counts().reset_index()
             zona_counts.columns = ['zona', 'count']
             fig_zona = px.bar(zona_counts, x='zona', y='count', title='OS por Zona',
                               color_discrete_sequence=['#36A2EB'])
             st.plotly_chart(fig_zona, use_container_width=True)
+        elif 'zona' in df_os.columns and df_os['zona'].empty:
+             st.info("Nenhum dado de 'zona' para exibir o gráfico por zona.")
         else:
             st.warning("Coluna 'zona' não encontrada nos dados para gerar o gráfico por zona.")
+
 
         # Placeholder for Activity and Trend graphs (requires date/time columns)
         # You would need to add date/time columns to your ordens_servico table
@@ -289,6 +301,7 @@ def main_dashboard():
         st.write("Funcionalidades para criar/gerenciar usuários aqui.")
 
         # Example: Display existing users (excluding password)
+        # Check if the database file exists before attempting connection
         if not os.path.exists(db_path):
             st.error(f"Database file not found at {db_path}. Cannot display users.")
         else:
@@ -306,6 +319,7 @@ def main_dashboard():
         if st.button("Criar Usuário"):
             if not new_username or not new_password:
                 st.error("Nome de usuário e senha são obrigatórios.")
+            # Check if the database file exists before attempting connection
             elif not os.path.exists(db_path):
                  st.error(f"Database file not found at {db_path}. Cannot create user.")
             else:
@@ -318,11 +332,8 @@ def main_dashboard():
                     conn.close()
                 else:
                     hashed_password = generate_password_hash(new_password)
-                    try:
-                        created_at = pd.Timestamp.now().strftime('%d/%m/%Y')
-                    except:
-                         import time
-                         created_at = time.strftime('%d/%m/%Y')
+                    # Use time.strftime for date consistency
+                    created_at = time.strftime('%d/%m/%Y')
 
                     c.execute('''INSERT INTO users (username, password, role, created_at) VALUES (?, ?, ?, ?)''',
                               (new_username, hashed_password, new_role, created_at))
@@ -340,6 +351,7 @@ def main_dashboard():
         if st.button("Alterar Senha"):
              if not target_username_change or not new_password_change:
                  st.error("Nome de usuário e nova senha são obrigatórios.")
+             # Check if the database file exists before attempting connection
              elif not os.path.exists(db_path):
                  st.error(f"Database file not found at {db_path}. Cannot change password.")
              else:
@@ -369,6 +381,7 @@ def main_dashboard():
     # --- Report Generation ---
     st.subheader("Relatórios")
     if st.button("Gerar Relatório CSV"):
+         # Check if the database file exists before attempting connection
          if not os.path.exists(db_path):
              st.error(f"Database file not found at {db_path}. Cannot generate report.")
          else:
@@ -395,17 +408,20 @@ if 'logged_in' not in st.session_state:
     st.session_state['logged_in'] = False
 
 # Check if required libraries are installed (basic check for Streamlit)
+# Removed explicit sqlite3 check as it's built-in
 try:
     import streamlit as st
     import pandas as pd
     import sqlite3
     from werkzeug.security import check_password_hash
     import plotly.express as px
-except ImportError:
-    st.error("Parece que as bibliotecas necessárias não estão instaladas. Por favor, execute as células de instalação.")
+    import os # Ensure os is imported for path checks
+except ImportError as e:
+    st.error(f"Parece que as bibliotecas necessárias não estão instaladas. Erro: {e}")
     st.stop() # Stop the app if imports fail
 
 
+# Main application flow: Login or Dashboard
 if st.session_state['logged_in']:
     main_dashboard()
 else:
